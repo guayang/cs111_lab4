@@ -649,6 +649,11 @@ static void task_upload(task_t *t)
 	}
 	t->head = t->tail = 0;
 
+	if (strstr(t->filename,"/") != NULL) {
+		error("The file %s is outside of the current directory", t->filename);
+		goto exit;
+	}
+
 	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
 		error("* Cannot open file %s", t->filename);
@@ -774,6 +779,7 @@ int main(int argc, char *argv[])
 		pid_t pid = fork();
 		if (pid == 0){
 			task_upload(t);
+			exit(0);
 		}
 	}
 
