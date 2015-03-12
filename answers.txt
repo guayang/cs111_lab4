@@ -30,27 +30,25 @@ We implemented the concurrency using forks for the download and upload sections.
 # EXERCISE 2A: What conditions did you find and fix that would have
 #    triggered a buffer overrun bug?  (~1-3 sentences each)
 
-1. The Linux maximum filename 256, but osppeer.c doesn’t check for the filename length when uploading files. We fixed this bug by using the constant FILENAMESIZ defined at the beginning of osppeer.c.
+The Linux maximum filename 256, but osppeer.c doesn’t check for the filename length when uploading files. We fixed this bug by using the constant FILENAMESIZ defined at the beginning of osppeer.c.
 	
 # EXERCISE 2B: What other robustness problems did you fix?  (~1-3 sentences
 #    each)
 
-1. We prevented the peer from serving any files outside of its current directory by examining the filename string and seeing if it contained any “/” characters.
-2. If a peer receives a file request, it will write the file data into its task buffer, along with an associated file descriptor. The requesting peer would then read from the buffer in order to download the file. However, if the requesting peer does not read from the file, the resources from the buffer  and the file descriptor will never be released.
-(also downloading from empty buffer)
+1. We prevented the peer from serving any files outside of its current directory by examining the filename string and seeing if it contained any “/” characters. We also verify the validity of the absolute path with the function realpath().
+2. If a peer receives a file request, it will write the file data into its task buffer, along with an associated file descriptor. The requesting peer would then read from the buffer in order to download the file. However, if the requesting peer does not read from the file, the resources from the buffer ?? and the file descriptor will never be released.
+3. A peer might downloading a file that uses too much disk space. We designed a variable MAXFILESIZ = 2^31 to check for the size of a file in the function task_download(). If the file to download exceeds the maximum file size, the program will stop the current ask and try to download the file from other peers.
 
 # EXERCISE 3: Describe the attacks you implemented for "evil mode".  Why
 #    are they attacks?  (~3-10 sentences each)
--pick a victim, register as victim on tracker with IP and port number, register lots of files so that a lot of peers will attempt to download from the victim—> run out of resources
--register malicious file in different/popular name to trick other downloading peers
+1. We created a buffer overflow attack by downloading a file with a filename that is too long. Specifically, the filename is twice the size of the filename buffer in the function task_download().
+2. We can attempt to trick a peer into uploading files that are outside of its current working directory by sending GET requests with illegal pathnames. This can be dangerous if a peer requests for files that contain confidential information, like passwords.
+3. Similar to the filename buffer overflow attack, we can create buffer overflow in the file itself. A peer could upload a file that is effectively infinite in size by altering the contents of the file to ‘/dev/zero’, so that other peers that download the data will be bombarded with large amounts of junk data.
+4. To implement a Denial of Service (DDOS) attack, we can have a peer set up an infinite number of connections to peers that have a certain file requested. This way, the peer floods other peers with requests without downloading the file, effectively freezing the other peers.
 
 # Extra credit problems
 #Extra credit problem:
-Check MD5 before download file from tracker, download the file from peer, check MD5 again (if the same, we’re ok, else, the file is corrupted)
+
+We created file integrity by implementing the MD5 checksum. Before downloading a file from  the tracker, we check the MD sum by calculating the MD digest of the file and sending the information to the tracker. Once another peer downloads that file, the peer can retrieve the MD5 checksum from the tracker. The peer can then calculate the MD5 digest from the file and compare it to the MD5 digest it received from the tracker. If the two MD5 checksums do not match, then the file is corrupted and the peer will download the file from other peers. Otherwise, the peer will continue to download the file from the current peer.
 
 # Add any other information you'd like us to know below this line.
-
-
-To-Do:
--implement 2, 3, extra credit
--flesh out answers
