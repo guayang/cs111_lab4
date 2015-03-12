@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,6 +38,8 @@ static int listen_port;
 
 #define TASKBUFSIZ	4096	// Size of task_t::buf
 #define FILENAMESIZ	256	// Size of task_t::filename
+
+#define MAXFILESIZ 1<<31
 
 typedef enum tasktype {		// Which type of connection is this?
 	TASK_TRACKER,		// => Tracker connection
@@ -72,6 +75,8 @@ typedef struct task {
 				// function initializes this list;
 				// task_pop_peer() removes peers from it, one
 				// at a time, if a peer misbehaves.
+    md5_state_t *md5_state;			// the state of MD5 Algorithm
+	char checksum[MD5_TEXT_DIGEST_SIZE+1];	// MD5 checksum of the file, checksum[MD5_TEXT_DIGEST_SIZE]='\0';
 } task_t;
 
 
@@ -94,7 +99,12 @@ static task_t *task_new(tasktype_t type)
 
 	strcpy(t->filename, "");
 	strcpy(t->disk_filename, "");
-
+    
+    // initialize MD5
+	t->md5_state = (md5_state_t *) malloc(sizeof(md5_state_t));
+	md5_init(t->md5_state);
+	memset(t->checksum, 0, MD5_TEXT_DIGEST_SIZE+1);
+    t->checksum[MD5_TEXT_DIGEST_SIZE]='\0';
 	return t;
 }
 
@@ -114,7 +124,8 @@ static void task_pop_peer(task_t *t)
 		t->head = t->tail = 0;
 		t->total_written = 0;
 		t->disk_filename[0] = '\0';
-
+        
+        free(t->md5_state);
 		// Move to the next peer
 		if (t->peer_list) {
 			peer_t *n = t->peer_list->next;
@@ -370,7 +381,7 @@ task_t *start_listen(void)
 
 	// If we get here, we tried about 200 ports without finding an
 	// available port.  Give up.
-	die("Tried ~200 ports without finding an open port, giving up.\n");
+	die("Tried ~2000 ports without finding an open port, giving up.\n");
 
     bound:
 	message("* Listening on port %d\n", listen_port);
@@ -385,6 +396,7 @@ task_t *start_listen(void)
 //	Registers this peer with the tracker, using 'myalias' as this peer's
 //	alias.  Also register all files in the current directory, allowing
 //	other peers to upload those files from us.
+
 static void register_files(task_t *tracker_task, const char *myalias)
 {
 	DIR *dir;
@@ -420,8 +432,27 @@ static void register_files(task_t *tracker_task, const char *myalias)
 			    || ent->d_name[namelen - 1] == 'h'))
 		    || (namelen > 1 && ent->d_name[namelen - 1] == '~'))
 			continue;
+        //open the file and calculate checksum:
+        FILE *file;
+		file = fopen(ent->d_name, "r");
+		fseek(file, 0, SEEK_END); //set offset to 0
+		unsigned long num_bytes = ftell(file); //calculate the # of bytes in a file
+		unsigned char *data = malloc(sizeof(char) * num_bytes);
+        fread(data, 1, num_bytes, file); //read file data to char *data
+        /* Part of md verification  */
+        md5_state_t *pms = malloc(sizeof(md5_state_t));
+        md5_init(pms);
+        md5_append(pms, data, num_bytes);
+        char checksum[MD5_TEXT_DIGEST_SIZE+1];
+        md5_finish_text(pms, checksum, 1);
+        checksum[MD5_TEXT_DIGEST_SIZE]='\0';
 
+        free(pms);
+        free(data);
+        fclose(file);
+        
 		osp2p_writef(tracker_task->peer_fd, "HAVE %s\n", ent->d_name);
+        osp2p_writef(tracker_task->peer_fd, "MD5 %s %s\n", ent->d_name, checksum);
 		messagepos = read_tracker_response(tracker_task);
 		if (tracker_task->buf[messagepos] != '2')
 			error("* Tracker error message while registering '%s':\n%s",
@@ -476,7 +507,12 @@ task_t *start_download(task_t *tracker_task, const char *filename)
 		error("* Error while allocating task");
 		goto exit;
 	}
-	strcpy(t->filename, filename);
+    if(strlen(filename)>FILENAMESIZ){
+        strncpy(t->filename, filename, FILENAMESIZ);
+        t->filename[FILENAMESIZ - 1] = '\0';
+    }else{
+        strcpy(t->filename, filename);
+    }
 
 	// add peers
 	s1 = tracker_task->buf;
@@ -520,12 +556,47 @@ static void task_download(task_t *t, task_t *tracker_task)
 	message("* Connecting to %s:%d to download '%s'\n",
 		inet_ntoa(t->peer_list->addr), t->peer_list->port,
 		t->filename);
+    
+    
+    //evil mode 4: DoS Attack
+    if (evil_mode == 4)
+	    while(1)
+		{
+			t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
+			if (t->peer_fd == -1) {
+				error("* Cannot connect to peer: %s\n", strerror(errno));
+				goto try_again;
+			}
+			osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+	        message("* EVIL MODE 4 ATTACK SUCCESS!\n *");
+	        message("* DoS Attack!\n *");
+		}
 	t->peer_fd = open_socket(t->peer_list->addr, t->peer_list->port);
 	if (t->peer_fd == -1) {
 		error("* Cannot connect to peer: %s\n", strerror(errno));
 		goto try_again;
 	}
-	osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+    
+    //evil mode 1: filename buffer overflow
+    if(evil_mode==1){
+        char *buffer_overflow=(char *)malloc(sizeof(char)*FILENAMESIZ*2);
+        memset(buffer_overflow,0,FILENAMESIZ*2);
+        osp2p_writef(t->peer_fd, "GET %s OSP2P\n", buffer_overflow);
+        message("* EVIL MODE 1 ATTACK SUCCESS!\n *");
+        message("* Buffer Overflow Attack!\n *");
+    }
+    //evil mode 3: Try to get file from outside of current working directory
+    else if(evil_mode==3){
+        osp2p_writef(t->peer_fd, "GET ../%s OSP2P\n", t->filename);
+        //another evilest case!!
+        //osp2p_writef(t->peer_fd, "GET /etc/passwd OSP2P\n");
+    }
+    
+    //normal mode
+    else
+        osp2p_writef(t->peer_fd, "GET %s OSP2P\n", t->filename);
+    
+
 
 	// Open disk file for the result.
 	// If the filename already exists, save the file in a name like
@@ -563,16 +634,64 @@ static void task_download(task_t *t, task_t *tracker_task)
 		} else if (ret == TBUF_END && t->head == t->tail)
 			/* End of file */
 			break;
-
 		ret = write_from_taskbuf(t->disk_fd, t);
 		if (ret == TBUF_ERROR) {
 			error("* Disk write error");
 			goto try_again;
 		}
+        //check for inifinite data stream; typically, the file size should be smaller than 2^31 Bytes.
+        if(t->total_written > (size_t) MAXFILESIZ){
+            error("* ERROR: File %s exceeded maximum file size.\n", t->filename);
+            error("* WARNING: Be aware of P2P attack!\nTry to download with other peers...\n");
+            goto try_again;
+        }
 	}
 
 	// Empty files are usually a symptom of some error.
 	if (t->total_written > 0) {
+        //check md5 after downloads:
+        int filename_len=strlen(t->disk_filename);
+        char *query=(char *)malloc(sizeof(char)*(4+filename_len+4));
+        
+        //query is like: "MD5 filename %s\n";
+        query[0]='M';
+        query[1]='D';
+        query[2]='5';
+        query[3]=' ';
+        int i;//for loop
+        for (i=0;i<filename_len;+i) query[4+i]=t->disk_filename[i];
+        query[4+filename_len]=' ';
+        query[4+filename_len+1]='%';
+        query[4+filename_len+2]='s';
+        query[4+filename_len+3]='\n';
+        //char *s=task_tracker->buf;
+        char md5[MD5_TEXT_DIGEST_SIZE+1];
+         
+        //Retrive MD5 from tracker:
+        osp2p_sscanf(tracker_task->buf, query, md5);
+
+        md5[MD5_TEXT_DIGEST_SIZE]='\0';
+        
+        //Calculate md5 of local file:
+        FILE *file;
+		file = fopen(t->disk_filename, "r");
+		fseek(file, 0, SEEK_END); //set offset to 0
+		unsigned long num_bytes = ftell(file); //calculate the # of bytes in a file
+		unsigned char *data = malloc(sizeof(char) * num_bytes);
+        fread(data, 1, num_bytes, file); //read file data to char *data
+        md5_append(t->md5_state, data, num_bytes);
+        md5_finish_text(t->md5_state, t->checksum, 1);
+        t->checksum[MD5_TEXT_DIGEST_SIZE]='\0';
+        
+        free(data);
+        fclose(file);
+        
+        //Compare MD5 digest:
+        if(strncmp(md5,t->checksum,MD5_TEXT_DIGEST_SIZE)!=0){
+            error("* MD5 Authenticaton failed. The file may be faked. Try to download with next peer.\n");
+            goto try_again;
+        }
+        
 		message("* Downloaded '%s' was %lu bytes long\n",
 			t->disk_filename, (unsigned long) t->total_written);
 		// Inform the tracker that we now have the file,
@@ -580,6 +699,8 @@ static void task_download(task_t *t, task_t *tracker_task)
 		if (strcmp(t->filename, t->disk_filename) == 0) {
 			osp2p_writef(tracker_task->peer_fd, "HAVE %s\n",
 				     t->filename);
+            osp2p_writef(tracker_task->peer_fd, "MD5 %s %s\n",
+                         t->filename, t->checksum);
 			(void) read_tracker_response(tracker_task);
 		}
 		task_free(t);
@@ -648,13 +769,37 @@ static void task_upload(task_t *t)
 		goto exit;
 	}
 	t->head = t->tail = 0;
-
-	if (strstr(t->filename,"/") != NULL) {
-		error("The file %s is outside of the current directory", t->filename);
+    
+    //check filename before open & upload:
+    
+    //check length of filename
+    if (strlen(t->filename) > FILENAMESIZ) {
+		error("* Filename is too long.\n");
 		goto exit;
 	}
+    
+    //check directory
+    char current_working_dir[PATH_MAX];
+    char path[PATH_MAX];
+    
+    if (!getcwd(current_working_dir, PATH_MAX)) {
+		error("* Invalid current working directory.\n");
+		goto exit;
+	}
+	if (!realpath(t->filename, path)) {
+		error("* Invalid file path.\n");
+		goto exit;
+	}
+	if (strncmp(current_working_dir, path, strlen(current_working_dir))) {
+		error("* File %s is not in current working directory.\n", t->filename);
+		goto exit;
+	}
+    // evil mode 2: uploading infinite data stream
+    if (evil_mode==2) 
+        t->disk_fd = open("/dev/zero", O_RDONLY);
+    else
+        t->disk_fd = open(t->filename, O_RDONLY);
 
-	t->disk_fd = open(t->filename, O_RDONLY);
 	if (t->disk_fd == -1) {
 		error("* Cannot open file %s", t->filename);
 		goto exit;
@@ -695,7 +840,10 @@ int main(int argc, char *argv[])
 	char *s;
 	const char *myalias;
 	struct passwd *pwent;
-
+    int num_download_proc=0; //# of proc forked for download tasks
+    int num_upload_proc=0; //# of proc forked for upload tasks
+    pid_t pid;
+    int status; // dummy parameter for waitpid, actually we don't care the status
 	// Default tracker is read.cs.ucla.edu
 	osp2p_sscanf("164.67.100.231:11111", "%I:%d",
 		     &tracker_addr, &tracker_port);
@@ -765,23 +913,43 @@ int main(int argc, char *argv[])
 
 	// First, download files named on command line.
 	for (; argc > 1; argc--, argv++)
-	{
-		pid_t pid = fork();
-		if (pid == 0){
-			if ((t = start_download(tracker_task, argv[1])))
-				task_download(t, tracker_task);
-			exit(0);
-		}
-	}
-
+		
+            //task_download(t, tracker_task);
+            if (num_download_proc<16) {
+                pid=fork();
+                if(pid<0) error("* Fail to fork new process for download.\n");
+                else if(pid==0){
+                	if ((t = start_download(tracker_task, argv[1]))){
+                    	task_download(t, tracker_task);
+                    }
+                    exit(0);
+                }else{// pid>0
+                    num_download_proc++;
+                }
+            }
+			
 	// Then accept connections from other peers and upload files to them!
 	while ((t = task_listen(listen_task))){
-		pid_t pid = fork();
-		if (pid == 0){
-			task_upload(t);
-			exit(0);
-		}
-	}
+		//task_upload(t);
+        while (num_download_proc>0) {
+            waitpid(-1, &status, 0);
+            num_download_proc--;
+        }
+        message("* Finish downloading. Start uploading...\n");
+        if (num_upload_proc<16) {
+            pid=fork();
+            if(pid<0) error("* Fail to fork new process for upload.\n");
+            else if(pid==0){
+                task_upload(t);
+                exit(0);
+            }else{// pid>0
+                num_upload_proc++;
+            }
+        }
+        if (waitpid(-1, &status, WNOHANG)>0) {
+            num_upload_proc--;
+        }
+    }
 
 	return 0;
 }
